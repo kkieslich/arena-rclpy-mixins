@@ -11,6 +11,8 @@ import rclpy.qos
 from arena_rclpy_mixins.Async import AsyncNode, ClientWrapper
 from arena_rclpy_mixins.Time import TimeNode
 
+_GET_STATE_ATTEMPT_S = 2.0
+
 
 class _ClientOptions(typing.TypedDict, total=False):
     qos_profile: rclpy.qos.QoSProfile
@@ -172,8 +174,9 @@ class AsyncLifecycleClient(AsyncNode):
         start_time = self.wall_time
         try:
             while True:
+                attempt = _GET_STATE_ATTEMPT_S if timeout is None else min(_GET_STATE_ATTEMPT_S, max(timeout - (self.wall_time - start_time).to_seconds(), 0.0))
                 try:
-                    res = await self._call_wrapper(cli, lifecycle_msgs.srv.GetState.Request(), timeout)
+                    res = await self._call_wrapper(cli, lifecycle_msgs.srv.GetState.Request(), attempt)
                 except TimeoutError:
                     pass
                 else:
