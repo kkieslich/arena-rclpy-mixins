@@ -207,6 +207,17 @@ class TimeNode(rclpy.node.Node):
         for loop, future in waiters:
             loop.call_soon_threadsafe(_resolve, future)
 
+    def on_clock(self, callback: typing.Callable[[Time], None]) -> typing.Callable[[], None]:
+        """Call `callback` with the time of every /clock message, after `sim_time` holds it. Returns the removal."""
+        with self.__clock_lock:
+            self.__clock_listeners.append(callback)
+
+        def remove() -> None:
+            with self.__clock_lock:
+                self.__clock_listeners.remove(callback)
+
+        return remove
+
     def next_clock(self) -> asyncio.Future[None]:
         """Future resolved by the next /clock message."""
         loop = asyncio.get_running_loop()
@@ -404,10 +415,8 @@ class TimeNode(rclpy.node.Node):
                     loop.call_soon_threadsafe(events.put_nowait, dt)
 
         events.put_nowait(0.0)
-        with self.__clock_lock:
-            self.__clock_listeners.append(_on_clock)
+        remove = self.on_clock(_on_clock)
         try:
             yield done, events
         finally:
-            with self.__clock_lock:
-                self.__clock_listeners.remove(_on_clock)
+            remove()
