@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import datetime
 import functools
+import inspect
 import math
 import threading
 import typing
@@ -10,11 +11,13 @@ import attrs
 import builtin_interfaces.msg
 import rclpy.callback_groups
 import rclpy.clock
+import rclpy.duration
 import rclpy.node
 import rclpy.qos
 import rclpy.time
 import rclpy.timer
 import rosgraph_msgs.msg
+from rclpy.exceptions import InvalidHandle
 from typing_extensions import Self
 
 T = typing.TypeVar('T')
@@ -190,6 +193,22 @@ class TimeNode(rclpy.node.Node):
         self.__clock_waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = []
         self.__clock_listeners: list[typing.Callable[[Time], None]] = []
         self.__clock_lock = threading.Lock()
+        self.__clock_jump = self.get_clock().create_jump_callback(
+            rclpy.clock.JumpThreshold(min_forward=rclpy.duration.Duration(nanoseconds=1), min_backward=rclpy.duration.Duration(nanoseconds=-1), on_clock_change=False),
+            post_callback=self.__on_clock_jump,
+        )
+
+    def __ros_time(self) -> Time | None:
+        clock = self.get_clock()
+        if isinstance(clock, rclpy.clock.ROSClock) and clock.ros_time_is_active:
+            return Time.parse(clock.now())
+        return None
+
+    def __on_clock_jump(self, _jump: rclpy.clock.TimeJump) -> None:
+        """Holds the node clock's new time before any timer on that clock is dispatched."""
+        now = self.__ros_time()
+        if now is not None:
+            self.__sim_time = now
 
     def __clock_callback(self, msg: rosgraph_msgs.msg.Clock):
         """Callback for /clock topic to update node clock when using simulated time.
@@ -198,7 +217,8 @@ class TimeNode(rclpy.node.Node):
             msg (rosgraph_msgs.msg.Clock): Clock message
         """
         now = Time.from_rosgraph_msg(msg)
-        self.__sim_time = now
+        ros_now = self.__ros_time()
+        self.__sim_time = now if ros_now is None else max(now, ros_now)
         with self.__clock_lock:
             listeners = list(self.__clock_listeners)
             waiters, self.__clock_waiters = self.__clock_waiters, []
@@ -357,6 +377,45 @@ class TimeNode(rclpy.node.Node):
         if self.__wall_clock is None:
             self.__wall_clock = rclpy.clock.Clock(clock_type=rclpy.clock.ClockType.STEADY_TIME)
         return self.__wall_clock
+
+    def create_timer(
+        self,
+        timer_period_sec: float,
+        callback: typing.Callable[[], typing.Any],
+        callback_group: rclpy.callback_groups.CallbackGroup | None = None,
+        clock: rclpy.clock.Clock | None = None,
+        autostart: bool = True,
+    ) -> rclpy.timer.Timer:
+        """Timer that skips a repeated dispatch, one leaving its next call more than a period away, and moves that call back by the period."""
+        timer: rclpy.timer.Timer
+
+        def _due() -> bool:
+            try:
+                until = timer.time_until_next_call()
+                period = timer.timer_period_ns
+            except InvalidHandle:
+                return True
+            if until is None or until <= period:
+                return True
+            timer.timer_period_ns = until - period
+            timer.reset()
+            timer.timer_period_ns = period
+            return False
+
+        if inspect.iscoroutinefunction(callback):
+
+            async def _guarded_async() -> object:
+                return await callback() if _due() else None
+
+            guarded: typing.Callable[[], typing.Any] = _guarded_async
+        else:
+
+            def _guarded() -> object:
+                return callback() if _due() else None
+
+            guarded = _guarded
+        timer = super().create_timer(timer_period_sec, guarded, callback_group=callback_group, clock=clock, autostart=autostart)
+        return timer
 
     def wall_timer(
         self,

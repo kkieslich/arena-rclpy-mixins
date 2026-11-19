@@ -20,7 +20,7 @@ Sourced from `__init__.py` plus the submodules it re-exports.
 | `LifecycleClient` | mixin | Sync `get_lifecycle_state`, `change_lifecycle_state`, `wait_for_lifecycle_state` | Driving a peer lifecycle node from sync code |
 | `AsyncLifecycleClient` | mixin | Async `*_async` variants of the above via `ClientWrapper` | Driving a peer lifecycle node from `async` context |
 | `ServiceNamespace` | mixin | `service_namespace(*parts)`: node-FQN-prefixed `Namespace` | Correct service/topic prefixing (rclpy ignores node namespace for services) |
-| `TimeNode` | mixin | `.sim_time`, `.wall_time`, `.time`, `.wall_clock`, `.wall_timer()`, `.sim_time_rate()` | Any node that needs clock utilities |
+| `TimeNode` | mixin | `.sim_time`, `.wall_time`, `.time`, `.wall_clock`, `.create_timer()`, `.wall_timer()`, `.sim_time_rate()` | Any node that needs clock utilities |
 | `Time` | class | Arithmetic, comparable, converts between `rclpy.time.Time`, `builtin_interfaces.msg.Time`, `rosgraph_msgs.msg.Clock`, and `float` | Time math without rclpy churn |
 | `AsyncNode` | class | `await_ros()`, `loop_future()`, `wait_for()`, `sync_wrap()`, `ros_callback()`, `create_client_wrapper()`, `create_action_client_wrapper()`, `do_launch()` | Nodes mixing async and sync code |
 | `ClientWrapper` | class | Async `call_timeout()` / sync `call_timeout_sync()` around a service client, bounded `call_forever()`, `prime()` answering a caller's harmless probe before the first call | Service calls with timeout logging |
@@ -75,10 +75,16 @@ ROS callbacks.
 ## Time
 
 `TimeNode` subscribes to `/clock` and exposes `.sim_time` (latest simulated
-time), `.wall_time` (datetime-based wall clock), and `.time` (delegates to the
-node clock, respecting `use_sim_time`). `wall_timer(period, cb)` creates a
-timer driven by the steady wall clock regardless of `use_sim_time`. The `Time`
-value type supports arithmetic, comparison, and round-trips to all ROS time
+time, under `use_sim_time` never behind the node clock and updated on its
+jumps, so a sim clock timer reads the time that fired it), `.wall_time`
+(datetime-based wall clock), and `.time` (delegates to the node clock,
+respecting `use_sim_time`). `wall_timer(period, cb)` creates a timer driven by
+the steady wall clock regardless of `use_sim_time`. Every timer from
+`create_timer` skips a dispatch that leaves its next call more than one period
+away and moves that call back by the period: the `EventsExecutor` dispatches a
+timer twice when two clock jumps see it ready, which pushes a sim clock timer a
+period ahead and wedges a lockstep channel it beats. The `Time` value type
+supports arithmetic, comparison, and round-trips to all ROS time
 representations.
 
 ## Parameters
