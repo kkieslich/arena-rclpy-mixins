@@ -5,6 +5,7 @@ import functools
 import inspect
 import math
 import threading
+import time
 import typing
 
 import attrs
@@ -13,6 +14,7 @@ import rclpy.callback_groups
 import rclpy.clock
 import rclpy.duration
 import rclpy.node
+import rclpy.publisher
 import rclpy.qos
 import rclpy.time
 import rclpy.timer
@@ -479,3 +481,41 @@ class TimeNode(rclpy.node.Node):
             yield done, events
         finally:
             remove()
+
+
+class ClockEcho[T]:
+    """Publisher that resends its latest message when /clock repeats the time it last saw, at most once per `min_interval_s` of wall time, and drops it when /clock goes back."""
+
+    def __init__(self, node: TimeNode, publisher: rclpy.publisher.Publisher, min_interval_s: float = 0.25) -> None:
+        self._publisher = publisher
+        self._min_interval_s = min_interval_s
+        self._latest: T | None = None
+        self._clock_ns: int | None = None
+        self._echoed_at = -math.inf
+        self._remove = node.on_clock(self._on_clock)
+
+    @property
+    def publisher(self) -> rclpy.publisher.Publisher:
+        return self._publisher
+
+    def publish(self, msg: T) -> None:
+        self._latest = msg
+        self._publisher.publish(msg)
+
+    def close(self) -> None:
+        """Stop echoing, the publisher stays the caller's."""
+        self._remove()
+
+    def _on_clock(self, now: Time) -> None:
+        clock_ns = now.to_nanoseconds()
+        if self._clock_ns is not None and clock_ns < self._clock_ns:
+            self._latest = None
+        repeated = clock_ns == self._clock_ns
+        self._clock_ns = clock_ns
+        if not repeated or self._latest is None:
+            return
+        wall = time.monotonic()
+        if wall - self._echoed_at < self._min_interval_s:
+            return
+        self._echoed_at = wall
+        self._publisher.publish(self._latest)

@@ -10,6 +10,7 @@ _EXPORTS = {
     'AsyncNode': '.Async',
     'AsyncUtil': '.Async',
     'ClientWrapper': '.Async',
+    'ClockEcho': '.Time',
     'AsyncLifecycleClient': '.LifecycleClient',
     'LifecycleClient': '.LifecycleClient',
     'ArenaMixinNode': '.node',
@@ -99,6 +100,7 @@ if typing.TYPE_CHECKING:
     from .spin import spin_context as spin_context
     from .spin import spin_node as spin_node
     from .spin import start_loop_watchdog as start_loop_watchdog
+    from .Time import ClockEcho as ClockEcho
     from .Time import Time as Time
     from .Time import TimeNode as TimeNode
     from .yaml_replace import YAMLReplacer as YAMLReplacer
