@@ -195,6 +195,7 @@ class TimeNode(rclpy.node.Node):
         self.__clock_waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = []
         self.__clock_listeners: list[typing.Callable[[Time], None]] = []
         self.__clock_lock = threading.Lock()
+        self.__owed: dict[rclpy.timer.Timer, tuple[int, int, int]] = {}
         self.__clock_jump = self.get_clock().create_jump_callback(
             rclpy.clock.JumpThreshold(min_forward=rclpy.duration.Duration(nanoseconds=1), min_backward=rclpy.duration.Duration(nanoseconds=-1), on_clock_change=False),
             post_callback=self.__on_clock_jump,
@@ -212,6 +213,23 @@ class TimeNode(rclpy.node.Node):
         if now is not None:
             self.__sim_time = now
 
+    def __settle_owed(self) -> None:
+        """Moves each timer a repeated dispatch pushed back onto its grid, unless it was cancelled, retuned or reset since or the clock is a period or more past that call."""
+        with self.__clock_lock:
+            owed, self.__owed = self.__owed, {}
+        now = self.__ros_time()
+        if now is None:
+            return
+        now_ns = now.to_nanoseconds()
+        for timer, (target_ns, period_ns, pushed_ns) in owed.items():
+            with contextlib.suppress(InvalidHandle):
+                until = timer.time_until_next_call()
+                if until is None or timer.is_canceled() or timer.timer_period_ns != period_ns or now_ns + until != pushed_ns or now_ns - target_ns >= period_ns:
+                    continue
+                timer.timer_period_ns = target_ns - now_ns
+                timer.reset()
+                timer.timer_period_ns = period_ns
+
     def __clock_callback(self, msg: rosgraph_msgs.msg.Clock):
         """Callback for /clock topic to update node clock when using simulated time.
 
@@ -221,6 +239,7 @@ class TimeNode(rclpy.node.Node):
         now = Time.from_rosgraph_msg(msg)
         ros_now = self.__ros_time()
         self.__sim_time = now if ros_now is None else max(now, ros_now)
+        self.__settle_owed()
         with self.__clock_lock:
             listeners = list(self.__clock_listeners)
             waiters, self.__clock_waiters = self.__clock_waiters, []
@@ -388,7 +407,7 @@ class TimeNode(rclpy.node.Node):
         clock: rclpy.clock.Clock | None = None,
         autostart: bool = True,
     ) -> rclpy.timer.Timer:
-        """Timer that skips a repeated dispatch, one leaving its next call more than a period away, and moves that call back by the period."""
+        """Timer that under sim time skips a repeated dispatch, one leaving its next call more than a period away, and moves that call back by the period at the next /clock message."""
         timer: rclpy.timer.Timer
 
         def _due() -> bool:
@@ -397,11 +416,15 @@ class TimeNode(rclpy.node.Node):
                 period = timer.timer_period_ns
             except InvalidHandle:
                 return True
-            if until is None or until <= period:
+            if until is None or until <= period or timer.clock is not self.get_clock():
                 return True
-            timer.timer_period_ns = until - period
-            timer.reset()
-            timer.timer_period_ns = period
+            now = self.__ros_time()
+            if now is None:
+                return True
+            pushed = now.to_nanoseconds() + until
+            with self.__clock_lock:
+                target = self.__owed[timer][0] if timer in self.__owed else pushed - period
+                self.__owed[timer] = (target, period, pushed)
             return False
 
         if inspect.iscoroutinefunction(callback):
@@ -418,6 +441,11 @@ class TimeNode(rclpy.node.Node):
             guarded = _guarded
         timer = super().create_timer(timer_period_sec, guarded, callback_group=callback_group, clock=clock, autostart=autostart)
         return timer
+
+    def destroy_timer(self, timer: rclpy.timer.Timer) -> bool:
+        with self.__clock_lock:
+            self.__owed.pop(timer, None)
+        return super().destroy_timer(timer)
 
     def wall_timer(
         self,

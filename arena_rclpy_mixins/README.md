@@ -80,12 +80,15 @@ time, under `use_sim_time` never behind the node clock and updated on its
 jumps, so a sim clock timer reads the time that fired it), `.wall_time`
 (datetime-based wall clock), and `.time` (delegates to the node clock,
 respecting `use_sim_time`). `wall_timer(period, cb)` creates a timer driven by
-the steady wall clock regardless of `use_sim_time`. Every timer from
+the steady wall clock regardless of `use_sim_time`. Every sim clock timer from
 `create_timer` skips a dispatch that leaves its next call more than one period
-away and moves that call back by the period: the `EventsExecutor` dispatches a
-timer twice when two clock jumps see it ready, which pushes a sim clock timer a
-period ahead and wedges a lockstep channel it beats. `ClockEcho(node,
-publisher)` publishes through `publisher` and resends its latest message when
+away and moves that call back by the period at the next `/clock` message,
+unless the timer was cancelled, retuned or reset since or the clock is a period
+or more past that call: the `EventsExecutor` queues a due timer again on every
+clock jump and timer reset until its dispatch runs, and each extra dispatch
+pushes the timer a period ahead and wedges a lockstep channel it beats. Timers
+on other clocks dispatch as in rclpy. `ClockEcho(node, publisher)` publishes
+through `publisher` and resends its latest message when
 `/clock` repeats the time it last saw, at most once per `min_interval_s` (0.25 s)
 of wall time, and drops it when the clock goes back. The `Time` value type supports
 arithmetic, comparison, and round-trips to all ROS time representations.
