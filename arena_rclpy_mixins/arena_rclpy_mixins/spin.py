@@ -110,9 +110,12 @@ def _shutdown_executor_on_signal(executor: rclpy.executors.Executor) -> Iterator
 
 
 def spin_node(node: rclpy.node.Node, *, executor: rclpy.executors.Executor | None = None) -> None:
-    """Spin a single node until shutdown, on the given executor or the global one."""
+    """Spin a single node until shutdown, on the given executor or a new EventsExecutor (create_executor)."""
     if executor is None:
-        executor = rclpy.get_global_executor()
+        # The global SingleThreadedExecutor rebuilds and waits on its wait set for every message, ~0.45 ms CPU per
+        # wake-up: the robot nodes of one fleet lane (task_server, power_publisher, acoustics_publisher, 4 robots)
+        # cost 0.73 cores on it and 0.31 on the EventsExecutor (dell, 4 lanes, same seeds).
+        executor = create_executor()
     with _shutdown_executor_on_signal(executor) as shutdown, spin_context():
         try:
             executor.add_node(node)
