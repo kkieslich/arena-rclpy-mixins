@@ -211,20 +211,20 @@ def main() -> None:
         time.sleep(1.0)
     elif mode == "sync_global_finalize":
         rclpy.init()
-        spin_node(Plain())
+        spin_node(Plain(), executor=rclpy.get_global_executor())
         _FINALIZER = SlowFinalizer()
     elif mode == "sync_events_slow":
         rclpy.init()
         spin_node(Plain(_SLOW_PUBLISH_S), executor=create_executor())
     elif mode == "sync_global_slow":
         rclpy.init()
-        spin_node(Plain(_SLOW_PUBLISH_S))
+        spin_node(Plain(_SLOW_PUBLISH_S), executor=rclpy.get_global_executor())
     elif mode == "sync_events_idle":
         rclpy.init()
         spin_node(Idle(), executor=create_executor())
     elif mode == "sync_global_idle":
         rclpy.init()
-        spin_node(Idle())
+        spin_node(Idle(), executor=rclpy.get_global_executor())
     elif mode == "sync_events_crowded":
         rclpy.init()
         sys.setswitchinterval(1e-6)
