@@ -15,8 +15,10 @@ if typing.TYPE_CHECKING:
     from arena_rclpy_mixins.Time import Time, TimeNode
 
 _NANOSECONDS_PER_SECOND = 10**9
-#: the steady one-shot that hands a due call to the executor fires this soon after it is armed [s]
-_KICK_S = 1e-6
+#: the steady kick that hands a due call to the executor fires this soon after it is armed [ns]
+_KICK_NS = 1_000
+#: and then not again for this long, unless it is armed again [ns]: one expiry per arming, even on a lagging executor
+_KICK_IDLE_NS = 3600 * _NANOSECONDS_PER_SECOND
 
 
 class SimClockTimer:
@@ -56,7 +58,7 @@ class SimClockTimer:
         self._last_ns: int | None = now
         steady = rclpy.clock.Clock(clock_type=rclpy.clock.ClockType.STEADY_TIME)
         dispatch = self._dispatch_async if inspect.iscoroutinefunction(callback) else self._dispatch
-        self._kick: rclpy.timer.Timer = rclpy.node.Node.create_timer(node, _KICK_S, dispatch, callback_group=callback_group, clock=steady, autostart=False)
+        self._kick: rclpy.timer.Timer = rclpy.node.Node.create_timer(node, _KICK_IDLE_NS / _NANOSECONDS_PER_SECOND, dispatch, callback_group=callback_group, clock=steady, autostart=False)
         self._remove_listener = node.on_clock(self._on_clock)
 
     def _now_ns(self) -> int | None:
@@ -86,7 +88,15 @@ class SimClockTimer:
             if due:
                 self._pending = True
         if due:
-            self._kick.reset()
+            self._arm_kick()
+
+    def _arm_kick(self) -> None:
+        """Make the kick expire once, now: a short period for the reset, then the idle period again, so the rcl timer is not
+        due again (and the executor not woken again) while its one dispatch waits."""
+        kick = self._kick
+        kick.timer_period_ns = _KICK_NS
+        kick.reset()
+        kick.timer_period_ns = _KICK_IDLE_NS
 
     def _take(self) -> bool:
         """Whether the call the kick was armed for is still due, moving the next call on if it is."""

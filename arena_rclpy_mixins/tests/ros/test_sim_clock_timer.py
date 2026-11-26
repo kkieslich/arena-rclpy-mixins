@@ -205,8 +205,9 @@ def test_coroutines_run_through_the_executor_and_a_callback_group_stays_exclusiv
 
 
 def test_a_lagging_events_executor_dispatches_each_sim_timer_at_most_once_per_mark() -> None:
-    """The storm this timer replaces: an EventsExecutor held in long callbacks while /clock runs on; every timer's
-    callbacks stay within one per 0.1 s mark of sim time, and a steady watchdog on the same executor stays on time."""
+    """The storm this timer replaces: an EventsExecutor held in long callbacks while /clock runs on, and the interpreter
+    held for over a second twice; every timer's callbacks stay within one per 0.1 s mark of sim time, and its kick is
+    dispatched at most twice per call (it does not expire again while its dispatch waits)."""
     from std_msgs.msg import Empty
 
     from arena_rclpy_mixins.spin import create_executor
@@ -216,7 +217,17 @@ def test_a_lagging_events_executor_dispatches_each_sim_timer_at_most_once_per_ma
     driver = rclpy.node.Node("sim_clock_lag_driver")
     clock = driver.create_publisher(Clock, "/clock", 10)
     load = driver.create_publisher(Empty, "/sim_clock_lag_load", 1000)
+    from arena_rclpy_mixins import sim_timer
+
     runs = [0] * 4
+    takes = [0]
+    take = sim_timer.SimClockTimer._take
+
+    def counted(self: typing.Any) -> bool:
+        takes[0] += 1
+        return take(self)
+
+    sim_timer.SimClockTimer._take = counted  # pyright: ignore[reportAttributeAccessIssue]
     for i in range(4):
         node.create_timer(PERIOD_S, lambda i=i: runs.__setitem__(i, runs[i] + 1))
     node.create_subscription(Empty, "/sim_clock_lag_load", lambda _m: time.sleep(0.004), 1000)
@@ -232,15 +243,23 @@ def test_a_lagging_events_executor_dispatches_each_sim_timer_at_most_once_per_ma
             assert time.monotonic() < deadline
             time.sleep(0.02)
         start, now = time.monotonic(), 1.0
+        held: dict[int, bool] = {}
         while time.monotonic() - start < 6.0:
             now += 1 / 30
             clock.publish(Clock(clock=Time.from_float(now).to_msg()))
             for _ in range(10):  # 300 load messages/s at 4 ms each: the executor runs behind
                 load.publish(Empty())
+            if int(time.monotonic() - start) in (2, 4) and not held.get(int(time.monotonic() - start)):
+                held[int(time.monotonic() - start)] = True
+                end = time.monotonic() + 1.2  # this thread holds the interpreter for over a second, several timers fall due
+                while time.monotonic() < end:
+                    pass
             time.sleep(1 / 30)
         marks = int((now - 1.0) / PERIOD_S) + 1
         assert all(r <= marks for r in runs), f"a timer ran {max(runs)} times for {marks} marks"
+        assert sum(runs) > 0 and takes[0] <= 2 * sum(runs), f"{takes[0]} kick dispatches for {sum(runs)} calls"
     finally:
+        sim_timer.SimClockTimer._take = take  # pyright: ignore[reportAttributeAccessIssue]
         executor.shutdown()
         spinner.join(timeout=5.0)
         driver.destroy_node()
