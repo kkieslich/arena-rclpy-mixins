@@ -2,7 +2,6 @@ import asyncio
 import contextlib
 import datetime
 import functools
-import inspect
 import math
 import threading
 import time
@@ -13,13 +12,13 @@ import builtin_interfaces.msg
 import rclpy.callback_groups
 import rclpy.clock
 import rclpy.duration
+import rclpy.exceptions
 import rclpy.node
 import rclpy.publisher
 import rclpy.qos
 import rclpy.time
 import rclpy.timer
 import rosgraph_msgs.msg
-from rclpy.exceptions import InvalidHandle
 from typing_extensions import Self
 
 T = typing.TypeVar('T')
@@ -195,7 +194,7 @@ class TimeNode(rclpy.node.Node):
         self.__clock_waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = []
         self.__clock_listeners: list[typing.Callable[[Time], None]] = []
         self.__clock_lock = threading.Lock()
-        self.__owed: dict[rclpy.timer.Timer, tuple[int, int, int]] = {}
+        self.__sim_timers: list[typing.Any] = []
         self.__clock_jump = self.get_clock().create_jump_callback(
             rclpy.clock.JumpThreshold(min_forward=rclpy.duration.Duration(nanoseconds=1), min_backward=rclpy.duration.Duration(nanoseconds=-1), on_clock_change=False),
             post_callback=self.__on_clock_jump,
@@ -213,23 +212,6 @@ class TimeNode(rclpy.node.Node):
         if now is not None:
             self.__sim_time = now
 
-    def __settle_owed(self) -> None:
-        """Moves each timer a repeated dispatch pushed back onto its grid, unless it was cancelled, retuned or reset since or the clock is a period or more past that call."""
-        with self.__clock_lock:
-            owed, self.__owed = self.__owed, {}
-        now = self.__ros_time()
-        if now is None:
-            return
-        now_ns = now.to_nanoseconds()
-        for timer, (target_ns, period_ns, pushed_ns) in owed.items():
-            with contextlib.suppress(InvalidHandle):
-                until = timer.time_until_next_call()
-                if until is None or timer.is_canceled() or timer.timer_period_ns != period_ns or now_ns + until != pushed_ns or now_ns - target_ns >= period_ns:
-                    continue
-                timer.timer_period_ns = target_ns - now_ns
-                timer.reset()
-                timer.timer_period_ns = period_ns
-
     def __clock_callback(self, msg: rosgraph_msgs.msg.Clock):
         """Callback for /clock topic to update node clock when using simulated time.
 
@@ -239,7 +221,6 @@ class TimeNode(rclpy.node.Node):
         now = Time.from_rosgraph_msg(msg)
         ros_now = self.__ros_time()
         self.__sim_time = now if ros_now is None else max(now, ros_now)
-        self.__settle_owed()
         with self.__clock_lock:
             listeners = list(self.__clock_listeners)
             waiters, self.__clock_waiters = self.__clock_waiters, []
@@ -399,6 +380,11 @@ class TimeNode(rclpy.node.Node):
             self.__wall_clock = rclpy.clock.Clock(clock_type=rclpy.clock.ClockType.STEADY_TIME)
         return self.__wall_clock
 
+    def _uses_sim_time(self) -> bool:
+        with contextlib.suppress(rclpy.exceptions.ParameterNotDeclaredException):
+            return bool(self.get_parameter('use_sim_time').value)
+        return False
+
     def create_timer(
         self,
         timer_period_sec: float,
@@ -407,44 +393,34 @@ class TimeNode(rclpy.node.Node):
         clock: rclpy.clock.Clock | None = None,
         autostart: bool = True,
     ) -> rclpy.timer.Timer:
-        """Timer that under sim time skips a repeated dispatch, one leaving its next call more than a period away, and moves that call back by the period at the next /clock message."""
-        timer: rclpy.timer.Timer
+        """Under `use_sim_time` a timer on the node clock is a `SimClockTimer`, fired from this node's /clock messages; any
+        other timer (a wall or steady clock, or no sim time) is rclpy's own."""
+        if (clock is None or clock is self.get_clock()) and self._uses_sim_time():
+            from arena_rclpy_mixins.sim_timer import SimClockTimer
 
-        def _due() -> bool:
-            try:
-                until = timer.time_until_next_call()
-                period = timer.timer_period_ns
-            except InvalidHandle:
-                return True
-            if until is None or until <= period or timer.clock is not self.get_clock():
-                return True
-            now = self.__ros_time()
-            if now is None:
-                return True
-            pushed = now.to_nanoseconds() + until
+            sim_timer = SimClockTimer(typing.cast(typing.Any, self), timer_period_sec, callback, callback_group, autostart=autostart)
             with self.__clock_lock:
-                target = self.__owed[timer][0] if timer in self.__owed else pushed - period
-                self.__owed[timer] = (target, period, pushed)
-            return False
+                self.__sim_timers.append(sim_timer)
+            return typing.cast(rclpy.timer.Timer, typing.cast(object, sim_timer))
+        return super().create_timer(timer_period_sec, callback, callback_group=callback_group, clock=clock, autostart=autostart)
 
-        if inspect.iscoroutinefunction(callback):
-
-            async def _guarded_async() -> object:
-                return await callback() if _due() else None
-
-            guarded: typing.Callable[[], typing.Any] = _guarded_async
-        else:
-
-            def _guarded() -> object:
-                return callback() if _due() else None
-
-            guarded = _guarded
-        timer = super().create_timer(timer_period_sec, guarded, callback_group=callback_group, clock=clock, autostart=autostart)
-        return timer
+    def destroy_node(self) -> None:
+        with self.__clock_lock:
+            sim_timers, self.__sim_timers = self.__sim_timers, []
+        for sim_timer in sim_timers:
+            sim_timer.destroy()
+        super().destroy_node()
 
     def destroy_timer(self, timer: rclpy.timer.Timer) -> bool:
-        with self.__clock_lock:
-            self.__owed.pop(timer, None)
+        from arena_rclpy_mixins.sim_timer import SimClockTimer
+
+        if isinstance(timer, SimClockTimer):
+            with self.__clock_lock:
+                if timer not in self.__sim_timers:
+                    return False
+                self.__sim_timers.remove(timer)
+            timer.destroy()
+            return True
         return super().destroy_timer(timer)
 
     def wall_timer(

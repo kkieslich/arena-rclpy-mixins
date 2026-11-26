@@ -80,14 +80,27 @@ time, under `use_sim_time` never behind the node clock and updated on its
 jumps, so a sim clock timer reads the time that fired it), `.wall_time`
 (datetime-based wall clock), and `.time` (delegates to the node clock,
 respecting `use_sim_time`). `wall_timer(period, cb)` creates a timer driven by
-the steady wall clock regardless of `use_sim_time`. Every sim clock timer from
-`create_timer` skips a dispatch that leaves its next call more than one period
-away and moves that call back by the period at the next `/clock` message,
-unless the timer was cancelled, retuned or reset since or the clock is a period
-or more past that call: the `EventsExecutor` queues a due timer again on every
-clock jump and timer reset until its dispatch runs, and each extra dispatch
-pushes the timer a period ahead and wedges a lockstep channel it beats. Timers
-on other clocks dispatch as in rclpy. `ClockEcho(node, publisher)` publishes
+the steady wall clock regardless of `use_sim_time`.
+
+Under `use_sim_time`, `create_timer` on the node clock returns a
+`SimClockTimer` ([`sim_timer.py`](arena_rclpy_mixins/sim_timer.py)), not an
+rcl timer on the ROS clock. The `EventsExecutor` queues a due ROS-time timer
+again on every clock jump and every reset. Under lag such a timer was
+dispatched over and over while its next call was periods away, and that held
+the executor's queue for tens of seconds.
+
+A `SimClockTimer` is checked by the node's `/clock` listener on every
+message. Once sim time reaches its next call, it arms a steady one-shot rcl
+timer in the timer's callback group, which hands the callback to the node's
+executor (coroutines included; the `EventsExecutor` takes no guard
+conditions). While that dispatch waits, no second one is armed. The next call
+then moves as `rcl_timer_call` moves it: by a period, and past every mark the
+clock already passed. A backward jump shifts it by the jump. It offers
+`cancel`, `reset`, `is_canceled`, `is_ready`, `timer_period_ns`,
+`time_until_next_call` and `time_since_last_call`, and goes with
+`destroy_timer` or the node.
+
+Timers on other clocks, and every timer without sim time, are rclpy's. `ClockEcho(node, publisher)` publishes
 through `publisher` and resends its latest message when
 `/clock` repeats the time it last saw, at most once per `min_interval_s` (0.25 s)
 of wall time, and drops it when the clock goes back. The `Time` value type supports
